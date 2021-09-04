@@ -3,7 +3,6 @@ from functools import partial
 import torch
 from torch import nn
 from torch.utils import checkpoint
-from einops import rearrange, repeat
 
 
 def checkpoint_wrapper(module, *args, apply=False, over_ride=None):
@@ -17,6 +16,12 @@ def checkpoint_wrapper(module, *args, apply=False, over_ride=None):
     if checkpoint is True:
         return checkpoint.checkpoint(inner, *args)
     return inner(*args)
+
+
+def generate_square_subsequent_mask(sz, device):
+    mask = (torch.triu(torch.ones((sz, sz), device=device)) == 1).transpose(0, 1)
+    mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+    return mask
 
 
 class Norm(nn.Module):
@@ -55,14 +60,13 @@ class Conv1d(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, heads, n_state, max_sequence):
+    def __init__(self, heads, n_state):
         super().__init__()
         assert n_state % heads == 0
         
         self.heads = heads
         self.n_state = n_state
         self.depth = self.n_state // self.heads
-        self.max_sequence = max_sequence
 
     def split_heads(self, x: torch.Tensor, batch: int, seq_len: int):
         # size = [batch, sequence, features]
