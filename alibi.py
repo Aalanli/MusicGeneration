@@ -33,7 +33,7 @@ class SimpleAttention(Attention):
         self.c_attn = Conv1d(self.n_state * 3, self.n_state)
         self.c_proj = Conv1d(self.n_state, self.n_state)
     
-    def multihead_attn(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask=None):
+    def multihead_attn(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask=None):
         """
         Most naive implementation
         mask.shape = [bs, k.shape[-2]]; k.shape[-2] = k_seq_len
@@ -47,7 +47,7 @@ class SimpleAttention(Attention):
         
         a = w.softmax(-1)
         out = a @ v
-        return out, a
+        return out
     
     def forward(self, x: torch.Tensor, mask):
         batch, seq_len, _ = x.size()
@@ -91,8 +91,8 @@ class DecoderBlock(nn.Module):
         return x
 
 
-class SimpleTransformer(nn.Module):
-    def __init__(self, n_vocab, d_model, n_layers, n_heads, max_sequence) -> None:
+class AlibiTransformer(nn.Module):
+    def __init__(self, n_vocab, d_model, n_layers, n_heads, max_sequence, proj_forward, dropout=0.1, activation=torch.nn.functional.relu) -> None:
         super().__init__()
 
         self.n_vocab = n_vocab
@@ -102,7 +102,7 @@ class SimpleTransformer(nn.Module):
         self.max_sequence = max_sequence
         
         self.embedding = nn.Parameter(torch.normal(size=(self.n_vocab, self.d_model), mean=0.0, std=0.02)) 
-        self.decoder_layers = nn.ModuleList([DecoderBlock(self.heads, self.max_sequence, self.d_model, checkpoint=checkpoint) for _ in range(self.n_layers)])
+        self.decoder_layers = nn.ModuleList([DecoderBlock(n_heads, d_model, proj_forward, activation, dropout) for _ in range(self.n_layers)])
         self.norm = Norm(self.d_model)
 
         mask = construct_alibi(max_sequence, n_heads)
@@ -110,7 +110,10 @@ class SimpleTransformer(nn.Module):
     
     def forward(self, x: torch.Tensor):
         batch, seq_len = x.size()
-        mask = self.mask[:, :seq_len, :seq_len]
+        if seq_len > self.max_sequence:
+            mask = construct_alibi(seq_len, self.heads).to(x)
+        else:
+            mask = self.mask[:, :seq_len, :seq_len]
 
         h = self.embedding[x]
 

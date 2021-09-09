@@ -1,7 +1,9 @@
 import os
 import pathlib
 import dill
+from typing import List, Tuple, Union
 from itertools import cycle
+from torch.nn.modules.module import T
 from tqdm import tqdm
 
 import torch
@@ -138,35 +140,32 @@ class TrainerWandb(Trainer):
     def __init__(
         self,
         model: torch.nn.Module,
-        criterion: torch.nn.Module = None,
         optimizer: torch.optim.Optimizer = None,
         directory: str = None,
         metric_step: int = None,
         checkpoint_step: int = None,
-        log_results_step: int = None,
         mixed_precision: bool = None,
         lr_scheduler: bool = None,
         max_checkpoints: int = None,
         config=None) -> None:
 
         self.model = model
-        self.criterion = criterion
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
         self.mixed_precison = mixed_precision
         self.scaler = torch.cuda.amp.GradScaler(enabled=mixed_precision)
-        self.dir = directory
+        self.loss = torch.nn.CrossEntropyLoss(ignore_index=0)  # Ignore zero padding
         self.metric_step = metric_step
         self.checkpoint_step = checkpoint_step
-        self.log_results_step = log_results_step
         self.config = config
 
         self.max_checkpoints_saved = max_checkpoints
         self.steps = 0
 
-        self.checkpointable = ['model', 'criterion', 'optimizer', 'scaler', 'steps']
+        self.checkpointable = ['model', 'optimizer', 'scaler', 'steps']
         
         self.id = self.config.name
+        self.dir = os.path.join(directory, self.id)
         self.batch_splits = self.config.batch_splits
 
         if isinstance(self.model, torch.nn.Module):    
@@ -185,13 +184,6 @@ class TrainerWandb(Trainer):
             # if model is a string to the model directory
             self.restore_objects(os.path.join(self.model, 'obj_ref.pkl'))
             self.restore_latest_checkpoint()
-    
-    def accuracy(self, real, pred):
-        with torch.no_grad():
-            accuracies = real.eq(pred.argmax(dim=1)) # pred = [batch, logits, seq_len]
-            mask = real.eq(0).logical_not()
-            accuracies = accuracies.logical_and(mask)
-            return accuracies.float().sum() / mask.float().sum()
 
     def train_step(self, sample):
         y = sample[:, 1:]
@@ -199,7 +191,6 @@ class TrainerWandb(Trainer):
         self.model.train()
         for x1, y1 in zip(x.chunk(self.batch_splits), y.chunk(self.batch_splits)):
             with torch.cuda.amp.autocast(enabled=self.mixed_precison):
-                #mask = generate_square_subsequent_mask(x1.size()[1])
                 logits = self.model(x1)  # logits = [batch, seq_len, classes]
                 logits = logits.transpose(-1, -2)  # loss expects logit classes in dim 1
                 loss = self.loss(logits, y1)
@@ -214,7 +205,7 @@ class TrainerWandb(Trainer):
         self.optimizer.zero_grad()
         self.steps += 1
 
-        accuracy = self.accuracy(y1, logits)
+        accuracy = accuracy_fn(y1, logits)
         return {'loss': float(loss), 'accuracy': float(accuracy)}
     
     def eval_step(self, sample):
@@ -223,13 +214,12 @@ class TrainerWandb(Trainer):
                 y = sample[:, 1:]
                 x = sample[:, :-1]
                 self.model.eval()
-                #mask = generate_square_subsequent_mask(x.size()[-1])
 
                 logits = self.model(x)
                 logits = logits.transpose(-1, -2)
                 loss = self.loss(logits, y)
             
-            accuracy = self.accuracy(y, logits)
+            accuracy = accuracy_fn(y, logits)
             return {'loss': float(loss), 'accuracy': float(accuracy)}
     
     def log_scalars(self, log: dict, prefix):
@@ -245,11 +235,11 @@ class TrainerWandb(Trainer):
         train_losses: dict = None  # placeholder
 
         metric_accum = 0
-        for y in tqdm(train_data, desc='epoch', unit='step'):
+        for y in tqdm(train_data, unit='step'):
             metric_accum += 1
 
             y = y.cuda()
-            new_train_log, model_out = self.train_step(y)
+            new_train_log = self.train_step(y)
             if train_losses is None:
                 train_losses = new_train_log
             else:
@@ -259,7 +249,7 @@ class TrainerWandb(Trainer):
             if eval_data is not None:
                 y = next(eval_data)
                 y = y.cuda()
-                new_eval_log, _ = self.eval_step(y)
+                new_eval_log  = self.eval_step(y)
                 if eval_losses is None:
                     eval_losses = new_eval_log
                 else:
@@ -281,8 +271,90 @@ class TrainerWandb(Trainer):
         self.regulate_checkpoints()  # save final checkpoint
     
     def train_epochs(self, epochs, train_data, eval_data=None):
-        run = wandb.init(project='ARTR', entity='allanl', dir=self.dir, id=self.id, resume='allow', config=self.config)
+        run = wandb.init(project='MusicGeneration', entity='allanl', dir=self.dir, id=self.id, resume='allow', config=self.config)
         wandb.watch(self.model)
         with run:
             for i in range(epochs):
                 self.train(iter(train_data), eval_data)
+    
+    def log_final_performance(self, data, title):
+        run = wandb.init(project='MusicGeneration', entity='allanl', dir=self.dir, id=self.id, resume='allow', config=self.config)
+        with run:
+            table = wandb.Table(data=data, columns=["Sequence_length", "Perplexity"])
+            wandb.log({"model_sequence_extrapolation": wandb.plot.line(table, "Sequence_length", "Perplexity", 
+                      title=title)})
+
+
+def accuracy_fn(real, pred):
+    with torch.no_grad():
+        accuracies = real.eq(pred.argmax(dim=1)) # pred = [batch, logits, seq_len]
+        mask = real.eq(0).logical_not()
+        accuracies = accuracies.logical_and(mask)
+        return accuracies.float().sum() / mask.float().sum()
+
+
+@torch.no_grad()
+def windowed_sample_pure(model: torch.nn.Module, sequence: torch.Tensor, sample_len: int, window_size=None) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Samples a new sequence purely from its own predictions
+    sequence.shape = [batch, seq_len]
+    """
+    logits: List[torch.Tensor] = []
+    for i in tqdm(range(sample_len)):
+        new_logits = model(sequence)
+        logits.append(new_logits[:, -1:, :])
+        sequence = torch.cat([sequence, logits[-1].argmax(-1)], dim=-1)
+        if window_size is not None and window_size > sequence.shape[-1]:
+            sequence = sequence[:, 1:]
+    return torch.cat(logits, dim=1)
+
+
+@torch.no_grad()
+def calculate_perplexities_pure(model: torch.nn.Module, sequence: torch.Tensor, sample_sizes: List[int], primer_size: int, window=None):
+    """
+    Uses ground truth of length model_max_sequence_len to predict a portion of length size,
+    not teacher forced
+    length of sequence must be greater or equal to max(sample_sizes) + model_max_sequence_len
+    """
+    perplexities = []
+    cross_entropy = torch.nn.CrossEntropyLoss(ignore_index=0)
+    for size in sample_sizes:
+        logits = windowed_sample_pure(model, sequence[:, :primer_size], size, window)
+        logits = logits.transpose(-1, -2)
+        #loss = cross_entropy(logits, sequence[:, model_max_sequence_len:model_max_sequence_len+size])
+        loss = accuracy_fn(sequence[:, primer_size:primer_size+size], logits)
+        perplexities.append(float(loss))
+    return [[x, y] for (x, y) in zip(sample_sizes, perplexities)]
+
+
+@torch.no_grad()
+def windowed_sample_teacher(model: torch.nn.Module, sequence: torch.Tensor, window_size: int) -> torch.Tensor:
+    """
+    Samples new tokens from previous ground truth tokens of size window_size
+    """
+    logits: List[torch.Tensor] = [model(sequence[:, :window_size])]
+    for i in tqdm(range(1, sequence.shape[-1] - window_size + 1)):
+        logits.append(model(sequence[:, i:window_size+i])[:, -1:, :])
+    
+    return torch.cat(logits, dim=1)
+
+
+def calculate_perplexities_teacher(model: torch.nn.Module, sequence: torch.Tensor, sample_sizes: List[int], window=None):
+    """
+    For each size in sample size, calculates a chunk of sequence of length size,
+    where each new token is predicted from previous ground truth tokens.
+    Optionally, model_max_sequence_len can be a list of integers,
+    for models that support sequence lengths that are greater than its training
+    sequence length; in this case, sample_sizes would have to equal model_max_sequence_len.
+    """
+    perplexities = []
+    cross_entropy = torch.nn.CrossEntropyLoss(ignore_index=0)
+    for size in sample_sizes:
+        if window is None:
+            logits = windowed_sample_teacher(model, sequence[:, :size], size)
+        else:
+            logits = windowed_sample_teacher(model, sequence[:, :size], window)
+        logits = logits.transpose(-1, -2)
+        loss = accuracy_fn(sequence[:, 1:size+1], logits)
+        perplexities.append(float(loss))
+    return [[x, y] for (x, y) in zip(sample_sizes, perplexities)]

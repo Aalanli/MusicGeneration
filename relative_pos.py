@@ -1,7 +1,9 @@
+# %%
 import torch
 import torch.nn as nn
 
 from base_layers import *
+
 
 class RelativeAttention(Attention):
     def __init__(self, heads, n_state, max_sequence):
@@ -10,7 +12,7 @@ class RelativeAttention(Attention):
 
         self.c_attn = Conv1d(self.n_state * 3, self.n_state)
         self.c_proj = Conv1d(self.n_state, self.n_state)
-        self.E = nn.Parameter(torch.Tensor(self.heads, self.max_sequence, n_state))
+        self.E = nn.Parameter(torch.Tensor(self.heads, self.max_sequence, n_state // heads))
         nn.init.xavier_normal_(self.E)
 
     def relative_attn(self, q: torch.Tensor, E: torch.Tensor, batch: int, seq_len: int):
@@ -57,31 +59,35 @@ class RelativeAttention(Attention):
 
 
 class DecoderBlock(nn.Module):
-    def __init__(self, heads, max_sequence, n_state, checkpoint=True):
+    def __init__(self, heads, max_sequence, n_state, proj_forward, activation, dropout):
         super().__init__()
         
         self.heads = heads
         self.max_sequence = max_sequence
         self.n_state = n_state
-        self.checkpoint = checkpoint
 
         self.attn = RelativeAttention(self.heads, self.n_state, self.max_sequence)
-        self.norm1 = Norm(self.n_state)
-        self.norm2 = Norm(self.n_state)
-        self.mlp = Mlp(self.n_state, self.n_state * 4)
-
-    def forward(self, x, mask=None):
-        a = checkpoint_wrapper(self.norm1, x, apply=self.checkpoint, over_ride=None)
-        a = checkpoint_wrapper(self.attn, a, mask, apply=self.checkpoint, over_ride=None)
-        x = x + a
-        m = checkpoint_wrapper(self.norm2, x, apply=self.checkpoint, over_ride=None)
-        m = checkpoint_wrapper(self.mlp, m, apply=self.checkpoint, over_ride=None)
-        x = x + m
+        self.linear1 = nn.Linear(n_state, proj_forward)
+        self.linear2 = nn.Linear(proj_forward, n_state)
+        self.norm1 = nn.LayerNorm(n_state)
+        self.norm2 = nn.LayerNorm(n_state)
+        self.drop = nn.Dropout(dropout)
+        self.activation = activation
+    
+    def forward(self, x, mask):
+        x1 = self.attn(x, mask)
+        x = self.drop(x1) + x  # save, non-deterministic
+        x = self.norm1(x)
+        x1 = self.activation(self.linear1(x))
+        x1 = self.drop(x1)  # save, non-deterministic
+        x1 = self.linear2(x1)
+        x = x + x1
+        x = self.norm2(x)
         return x
 
 
 class RelativeTransformer(nn.Module):
-    def __init__(self, n_vocab, d_model, n_layers, n_heads, max_sequence):
+    def __init__(self, n_vocab, d_model, n_layers, n_heads, max_sequence, proj_forward, dropout=0.1, activation=torch.nn.functional.relu) -> None:
         super().__init__()
 
         self.n_vocab = n_vocab
@@ -92,12 +98,15 @@ class RelativeTransformer(nn.Module):
 
         self.embedding = nn.Parameter(torch.normal(size=(self.n_vocab, self.d_model), mean=0.0, std=0.02))
         
-        self.decoder_layers = nn.ModuleList([DecoderBlock(self.heads, self.max_sequence, self.d_model, checkpoint=checkpoint) for _ in range(self.n_layers)])
+        self.decoder_layers = nn.ModuleList([DecoderBlock(n_heads, max_sequence, d_model, proj_forward, activation, dropout) for _ in range(self.n_layers)])
         self.norm = Norm(self.d_model)
+
+        mask = generate_square_subsequent_mask(max_sequence, 'cpu')
+        self.register_buffer("mask", mask)
 
     def forward(self, x: torch.Tensor):
         batch, seq_len = x.size()
-        mask = generate_square_subsequent_mask(x, x.device)
+        mask = self.mask[:seq_len, :seq_len]
 
         h = self.embedding[x]
 
@@ -110,4 +119,4 @@ class RelativeTransformer(nn.Module):
         logits = logits.reshape([batch, seq_len, self.n_vocab])
 
         return logits
-    
+

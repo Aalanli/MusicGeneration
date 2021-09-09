@@ -26,9 +26,10 @@ class Data(Dataset):
             sequence = pickle.load(f)
         # the first 0 class for padding, shift every encoding by 1
         sequence = torch.tensor(sequence) + 1
+        sequence = sequence.flatten(0)
         if sequence.shape[0] < self.seq_len:
             return torch.nn.functional.pad(sequence, (0, self.seq_len - sequence.shape[0]))
         
-        window = self.seq_len - sequence.shape[0]
+        window = sequence.shape[0] - self.seq_len
         start = random.randint(0, window)
         return sequence[start:start + self.seq_len]

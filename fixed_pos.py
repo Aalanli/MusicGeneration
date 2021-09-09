@@ -1,3 +1,4 @@
+# %%
 import math
 import torch
 import torch.nn as nn
@@ -23,12 +24,18 @@ def apply_rotary_pos_emb(q, k, sinu_pos):
 class FixedPositionalEmbedding(nn.Module):
     def __init__(self, dim, max_seq_len):
         super().__init__()
-        inv_freq = 1. / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        self.dim = dim
+        self.inv_freq = 1. / (10000 ** (torch.arange(0, dim, 2).float() / dim))
         position = torch.arange(0, max_seq_len, dtype=torch.float)
-        sinusoid_inp = torch.einsum("i,j->ij", position, inv_freq)
+        sinusoid_inp = torch.einsum("i,j->ij", position, self.inv_freq)
         emb = torch.cat((sinusoid_inp.sin(), sinusoid_inp.cos()), dim=-1)
         self.register_buffer('emb', emb)
-
+    
+    def calculate_new_embed(self, x):
+        position = torch.arange(0, x.shape[1], dtype=torch.float)
+        sinusoid_inp = torch.einsum("i,j->ij", position, self.inv_freq)
+        return torch.cat((sinusoid_inp.sin(), sinusoid_inp.cos()), dim=-1).unsqueeze(0).to(x)
+    
     def forward(self, x):
         return self.emb[None, :x.shape[1], :].to(x)
 
@@ -39,7 +46,7 @@ class SimpleAttention(Attention):
         self.c_attn = Conv1d(self.n_state * 3, self.n_state)
         self.c_proj = Conv1d(self.n_state, self.n_state)
     
-    def multihead_attn(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask=None):
+    def multihead_attn(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask=None):
         """
         Most naive implementation
         mask.shape = [bs, k.shape[-2]]; k.shape[-2] = k_seq_len
@@ -53,7 +60,7 @@ class SimpleAttention(Attention):
         
         a = w.softmax(-1)
         out = a @ v
-        return out, a
+        return out
     
     def forward(self, x: torch.Tensor, mask, pos):
         batch, seq_len, _ = x.size()
@@ -76,7 +83,6 @@ class DecoderBlock(nn.Module):
         super().__init__()
         self.heads = heads
         self.n_state = n_state
-        self.checkpoint = checkpoint
 
         self.attn = SimpleAttention(heads, n_state)
 
@@ -99,8 +105,8 @@ class DecoderBlock(nn.Module):
         return x
 
 
-class SimpleTransformer(nn.Module):
-    def __init__(self, n_vocab, d_model, n_layers, n_heads, max_sequence) -> None:
+class RotaryTransformer(nn.Module):
+    def __init__(self, n_vocab, d_model, n_layers, n_heads, max_sequence, proj_forward, dropout=0.1, activation=torch.nn.functional.relu) -> None:
         super().__init__()
 
         self.n_vocab = n_vocab
@@ -110,16 +116,20 @@ class SimpleTransformer(nn.Module):
         self.max_sequence = max_sequence
         
         self.embedding = nn.Parameter(torch.normal(size=(self.n_vocab, self.d_model), mean=0.0, std=0.02)) 
-        self.decoder_layers = nn.ModuleList([DecoderBlock(self.heads, self.max_sequence, self.d_model, checkpoint=checkpoint) for _ in range(self.n_layers)])
+        self.decoder_layers = nn.ModuleList([DecoderBlock(self.heads, d_model, proj_forward, activation, dropout) for _ in range(self.n_layers)])
         self.norm = Norm(self.d_model)
-        self.pos_embed = FixedPositionalEmbedding(d_model, max_sequence)
+        self.pos_embed = FixedPositionalEmbedding(d_model // n_heads, max_sequence)
         mask = generate_square_subsequent_mask(max_sequence, 'cpu')
         self.register_buffer("mask", mask)
     
     def forward(self, x: torch.Tensor):
         batch, seq_len = x.size()
-        mask = self.mask[:seq_len, :seq_len]
-        pos = self.pos_embed(x)
+        if seq_len > self.max_sequence:
+            mask = generate_square_subsequent_mask(seq_len, x.device)
+            pos = self.pos_embed.calculate_new_embed(x)
+        else:
+            mask = self.mask[:seq_len, :seq_len]
+            pos = self.pos_embed(x)
 
         h = self.embedding[x]
 
