@@ -9,6 +9,7 @@ from tqdm import tqdm
 import torch
 import wandb
 
+from sparse_mask import compute_sparsity
 
 class Trainer:
     """The general trainer base class"""
@@ -147,7 +148,9 @@ class TrainerWandb(Trainer):
         mixed_precision: bool = None,
         lr_scheduler: bool = None,
         max_checkpoints: int = None,
-        config=None) -> None:
+        config=None,
+        init_a=1.0,
+        init_b=0.5) -> None:
 
         self.model = model
         self.optimizer = optimizer
@@ -168,6 +171,8 @@ class TrainerWandb(Trainer):
         self.dir = os.path.join(directory, self.id)
         self.batch_splits = self.config.batch_splits
 
+        self.sparse_loss_coef = config.sparse_loss_coef
+
         if isinstance(self.model, torch.nn.Module):    
             if os.path.exists(self.dir):
                 self.restore_latest_checkpoint()
@@ -184,6 +189,21 @@ class TrainerWandb(Trainer):
             # if model is a string to the model directory
             self.restore_objects(os.path.join(self.model, 'obj_ref.pkl'))
             self.restore_latest_checkpoint()
+        
+        self.init_a = init_a
+        self.init_b = init_b
+    
+    def reset_ab(self, a, b):
+        self.init_a = a
+        self.init_b = b
+    
+    def compute_sparsity(self, sample):
+        with torch.no_grad():
+            x = sample[0:4, :-1]
+            _, sparsities = self.model(x, self.init_a, self.init_b, get_gate=True)
+            masks = [i[1] for i in sparsities]
+            sparsities = {i: compute_sparsity(mask) for i, mask in enumerate(masks)}
+            return sparsities
 
     def train_step(self, sample):
         y = sample[:, 1:]
@@ -191,10 +211,13 @@ class TrainerWandb(Trainer):
         self.model.train()
         for x1, y1 in zip(x.chunk(self.batch_splits), y.chunk(self.batch_splits)):
             with torch.cuda.amp.autocast(enabled=self.mixed_precison):
-                logits = self.model(x1)  # logits = [batch, seq_len, classes]
+                logits, sparsities = self.model(x1, self.init_a, self.init_b)  # logits = [batch, seq_len, classes]
                 logits = logits.transpose(-1, -2)  # loss expects logit classes in dim 1
-                loss = self.loss(logits, y1)
-                loss = loss.div(self.batch_splits)
+                pred_loss = self.loss(logits, y1).div(self.batch_splits)
+
+                sp_lossl = [t for t in sparsities]
+                sp_loss = self.sparse_loss_coef * sum(sp_lossl) / (len(sp_lossl) * self.batch_splits)
+                loss = (pred_loss + sp_loss)
             
             self.scaler.scale(loss).backward()
 
@@ -206,7 +229,10 @@ class TrainerWandb(Trainer):
         self.steps += 1
 
         accuracy = accuracy_fn(y1, logits)
-        return {'loss': float(loss), 'accuracy': float(accuracy)}
+        sparsities = {f'sparsity_layer_{i}': float(x.sum()) for i, x in enumerate(sp_lossl)}
+        metrics = {'loss': float(pred_loss), 'total_loss': float(loss), 'sparsity_loss': sp_loss, 'accuracy': float(accuracy)}
+        metrics.update(sparsities)
+        return metrics
     
     def eval_step(self, sample):
         with torch.cuda.amp.autocast(enabled=self.mixed_precison):
@@ -215,7 +241,7 @@ class TrainerWandb(Trainer):
                 x = sample[:, :-1]
                 self.model.eval()
 
-                logits = self.model(x)
+                logits, sparsities = self.model(x)
                 logits = logits.transpose(-1, -2)
                 loss = self.loss(logits, y)
             
@@ -259,6 +285,8 @@ class TrainerWandb(Trainer):
             if (self.steps + 1) % self.metric_step == 0:
                 self.div_scalars(train_losses, metric_accum)
                 self.log_scalars(train_losses, 'train')
+                self.log_scalars(self.compute_sparsity(y), 'train')
+                self.log_scalars({'a': self.init_a, 'b': self.init_b}, 'train')
                 self.zero_scalars(train_losses)
                 if eval_data is not None:
                     self.div_scalars(eval_losses, metric_accum)

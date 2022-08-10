@@ -1,0 +1,156 @@
+# %%
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from sparse_mask import fuzzy_gate, fuzzy_gate_impl, compute_sparsity, GatedSoftmax
+from conv_encoding import EncodingLayer
+
+from base_layers import *
+
+
+def get_slopes(n):
+    def get_slopes_power_of_2(n):
+        start = (2**(-2**-(math.log2(n)-3)))
+        ratio = start
+        return [start*ratio**i for i in range(n)]
+
+    if math.log2(n).is_integer():
+        return get_slopes_power_of_2(n)                   #In the paper, we only train models that have 2^a heads for some a. This function has
+    else:                                                 #some good properties that only occur when the input is a power of 2. To maintain that even
+        closest_power_of_2 = 2**math.floor(math.log2(n))  #when the number of heads is not a power of 2, we use this workaround. 
+        return get_slopes_power_of_2(closest_power_of_2) + get_slopes(2*closest_power_of_2)[0::2][:n-closest_power_of_2]
+
+
+def construct_alibi(max_seq_len, attn_heads):
+    slopes = torch.Tensor(get_slopes(attn_heads))
+    alibi = slopes.unsqueeze(1).unsqueeze(1) * torch.arange(max_seq_len).unsqueeze(0).unsqueeze(0).expand(attn_heads, -1, -1)
+    mask = generate_square_subsequent_mask(max_seq_len, 'cpu')
+    mask = mask.unsqueeze(0) + alibi
+    return mask
+
+
+class SimpleAttention(Attention):
+    def __init__(self, heads, n_state, sparse_dim):
+        super().__init__(heads, n_state)
+        self.c_attn = nn.Linear(self.n_state, self.n_state * 3) # Conv1d(self.n_state * 3, self.n_state)
+        self.c_proj = nn.Linear(self.n_state, self.n_state) # Conv1d(self.n_state, self.n_state)
+        #self.sparse_proj_q = nn.Linear(n_state // heads, sparse_dim)
+        #self.sparse_proj_k = nn.Linear(n_state // heads, sparse_dim)
+
+    
+    def multihead_attn(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, a_gate, b_gate, mask=None, get_gate_mask=False):
+        """
+        Most naive implementation
+        mask.shape = [bs, k.shape[-2]]; k.shape[-2] = k_seq_len
+        """
+        depth = q.shape[-1]
+        w = q @ k.transpose(-1, -2)
+        w = w / math.sqrt(depth)
+        if mask is not None:
+            w = w + mask
+        
+        #q1 = self.sparse_proj_q(q)
+        #k1 = self.sparse_proj_k(k)
+        #w1 = q1 @ k1.transpose(-1, -2)
+
+        #a, g_sum = GatedSoftmax.apply(w, w1, a_gate, b_gate)
+        a = w.softmax(-1)
+        out = a @ v
+
+        #if get_gate_mask:
+        #    gw = fuzzy_gate_impl(w1, a_gate, b_gate)
+        #    return (out, (g_sum.sum(), gw))
+        return (out, 0.0)
+    
+    def forward(self, x: torch.Tensor, a_gate, b_gate, mask, get_gate=False):
+        batch, seq_len, _ = x.size()
+        c = self.c_attn(x)
+        q, k, v = torch.split(c, self.n_state, dim=2)
+        q = self.split_heads(q, batch, seq_len)
+        k = self.split_heads(k, batch, seq_len)
+        v = self.split_heads(v, batch, seq_len)
+
+        a, sparsity = self.multihead_attn(q, k, v, a_gate, b_gate, mask, get_gate)
+        a = self.combine_heads(a, batch, seq_len)
+        a = self.c_proj(a)
+        return a, sparsity
+
+
+class DecoderBlock(nn.Module):
+    def __init__(self, heads, n_state, sparse_dim, proj_forward, activation, dropout):
+        super().__init__()
+        self.heads = heads
+        self.n_state = n_state
+        self.checkpoint = checkpoint
+
+        self.attn = SimpleAttention(heads, n_state, sparse_dim)
+
+        self.linear1 = nn.Linear(n_state, proj_forward)
+        self.linear2 = nn.Linear(proj_forward, n_state)
+        self.norm1 = nn.LayerNorm(n_state)
+        self.norm2 = nn.LayerNorm(n_state)
+        self.drop = nn.Dropout(dropout)
+        self.activation = activation
+    
+    def forward(self, x, a, b, mask, get_gate=False):
+        x1, sparsity = self.attn(x, a, b, mask, get_gate)
+        x = self.drop(x1) + x  # save, non-deterministic
+        x = self.norm1(x)
+        x1 = self.activation(self.linear1(x))
+        x1 = self.drop(x1)  # save, non-deterministic
+        x1 = self.linear2(x1)
+        x = x + x1
+        x = self.norm2(x)
+        return x, sparsity
+
+
+class AlibiTransformer(nn.Module):
+    def __init__(self, n_vocab, embed_dim, d_model, sparse_dim, n_layers, n_heads, max_sequence, proj_forward, dropout=0.1, 
+                 activation=torch.nn.functional.gelu) -> None:
+        super().__init__()
+        self.n_vocab = n_vocab
+        self.embed_dim = embed_dim
+        self.d_model = d_model
+        self.n_layers = n_layers
+        self.heads = n_heads
+        self.max_sequence = max_sequence
+        
+        self.embedding = nn.Parameter(torch.normal(size=(self.n_vocab, self.embed_dim), mean=0.0, std=0.02)) 
+        self.decoder_layers = nn.ModuleList([DecoderBlock(n_heads, d_model, sparse_dim, proj_forward, activation, dropout) for _ in range(self.n_layers)])
+        self.norm = Norm(self.d_model)
+
+        self.encoding_layer = EncodingLayer(d_model, d_model, 5, 7)
+
+        mask = construct_alibi(max_sequence, n_heads)
+        self.register_buffer("mask", mask)
+    
+    def forward(self, x: torch.Tensor, a=1, b=0.5, get_gate=False):
+        batch, seq_len = x.size()
+        h = self.embedding[x]
+        
+        if seq_len > self.max_sequence:
+            mask = construct_alibi(seq_len, self.heads).to(x)
+        else:
+            mask = self.mask[:, :seq_len, :seq_len]
+        
+        a_gate = torch.tensor([a], dtype=h.dtype, device=h.device)[:, None, None, None].repeat(batch, self.heads, 1, 1)
+        b_gate = torch.tensor([b], dtype=h.dtype, device=h.device)[:, None, None, None].repeat(batch, self.heads, 1, 1)
+        sparsities = []
+        for i, layer in enumerate(range(self.n_layers)):
+            h = self.encoding_layer(h)
+            h, sp = self.decoder_layers[layer](h, a_gate, b_gate, mask, get_gate)
+            sparsities.append(sp)
+
+        h = self.norm(h)
+        h_flat = h.reshape(batch * seq_len, self.embed_dim)
+        logits = h_flat @ self.embedding.transpose(-1, -2)
+        logits = logits.reshape([batch, seq_len, self.n_vocab])
+        return logits, sparsities
+
+"""a = AlibiTransformer(4, 256, 256, 8, 4, 8, 768, 1024).cuda()
+x = torch.randint(0, 4, [4, 700]).cuda()
+
+y, s = a(x)
+print(torch.isnan(y).any())"""

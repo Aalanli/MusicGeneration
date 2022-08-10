@@ -7,64 +7,73 @@ from data.dataset import Data
 from alibi import AlibiTransformer
 from fixed_pos import RotaryTransformer
 from relative_pos import RelativeTransformer
+from sparse_alibi import AlibiTransformer as SparseTransformer
 from model_utils import TrainerWandb, calculate_perplexities_pure, calculate_perplexities_teacher
 from misc import EasyDict, CustomScheduler
 
+data_dir = r'/media/allan/DATA1/Productivity/Programs/datasets/Music_dataset/maestro-v3.0.0'
 
 args = EasyDict()
 
 args.n_vocab = 246
+args.embed_dim = 512
 args.d_model = 512
-args.proj_forward = 1024
-args.n_layers = 6
+args.proj_forward = 2048
+args.n_layers = 4
 args.n_heads = 8
 args.dropout = 0.1
-args.max_seq_len = 1024
+args.max_sequence = 768
+args.sparse_dim = 32
 
-args.batch_size = 64
-args.batch_splits = 8
+t_args = EasyDict()
+t_args.batch_size = 64
+t_args.batch_splits = 8
+t_args.warmup_steps = 10000
+t_args.name = "sparse_formerV12"
+t_args.sparse_loss_coef = 0.3
 
-args.warmup_steps = 10000
 
-perf_dataset = train_data = Data('/home/allan/Programs/Music_generation/data/datasets/torch/train1', 4096)
-perf_dataset = DataLoader(perf_dataset, 8, shuffle=True, num_workers=8)
+#perf_dataset = train_data = Data('/home/allan/Programs/Music_generation/data/datasets/torch/train1', 1024)
+#perf_dataset = DataLoader(perf_dataset, 8, shuffle=True, num_workers=8)
 
-train_data = Data('/home/allan/Programs/Music_generation/data/datasets/torch/train1', args.max_seq_len + 1)
-test_data = Data('/home/allan/Programs/Music_generation/data/datasets/torch/test', args.max_seq_len + 1)
+train_data = Data('/home/allan/Programs/Music_generation/data/datasets/torch/train1', args.max_sequence + 1)
+test_data = Data('/home/allan/Programs/Music_generation/data/datasets/torch/test', args.max_sequence + 1)
 
-train_data = DataLoader(train_data, args.batch_size, shuffle=True, num_workers=8)
+train_data = DataLoader(train_data, t_args.batch_size, shuffle=True, num_workers=8)
 test_data = DataLoader(test_data, 2, shuffle=True, num_workers=4)
-
-alibi_args = args.get_copy()
-alibi_args.name = 'alibiTransformer'
-
-rotary_args = args.get_copy()
-rotary_args.name = 'rotaryTransformer'
-
-relative_args = args.get_copy()
-relative_args.name = 'relativeTransformer'
-
-
-train = [(rotary_args, RotaryTransformer), (alibi_args, AlibiTransformer), (relative_args, RelativeTransformer)]
 
 
 from matplotlib import pyplot as plt
-        
-for args, model in train[1:]:
-    model = model(args.n_vocab, args.d_model, args.n_layers, args.n_heads, args.max_seq_len, args.proj_forward, args.dropout).cuda()
-    
-    optimizer = torch.optim.Adam(model.parameters())
-    scheduler = CustomScheduler(optimizer, args.d_model, args.warmup_steps)
-    trainer = TrainerWandb(model, 
-                           optimizer, 
-                           'experiments', 
-                           metric_step=50, 
-                           checkpoint_step=200, 
-                           mixed_precision=True, 
-                           lr_scheduler=scheduler, 
-                           max_checkpoints=10, 
-                           config=args)
-    trainer.train_epochs(epochs=2, train_data=train_data, eval_data=test_data)
+
+
+model = SparseTransformer(**args).cuda()
+
+args.update(t_args)
+
+optimizer = torch.optim.Adam(model.parameters())
+scheduler = CustomScheduler(optimizer, args.d_model, t_args.warmup_steps)
+trainer = TrainerWandb(model, 
+                        optimizer, 
+                        'experiments', 
+                        metric_step=50, 
+                        checkpoint_step=200, 
+                        mixed_precision=False, 
+                        lr_scheduler=scheduler, 
+                        max_checkpoints=10, 
+                        config=args)
+# %%
+x = next(iter(train_data)).cuda()
+x = x[:4, :-1]
+print(x.shape)
+y,_ = model(x)
+print(torch.isnan(y).any())
+
+# %%
+trainer.train_epochs(epochs=1, train_data=train_data, eval_data=test_data)
+trainer.reset_ab(1, 1)
+trainer.train_epochs(epochs=1, train_data=train_data, eval_data=test_data)
+trainer.reset_ab(1, 2.0)
+trainer.train_epochs(epochs=1, train_data=train_data, eval_data=test_data)
 
 """    
     with torch.cuda.amp.autocast():
@@ -75,4 +84,13 @@ for args, model in train[1:]:
 plt.legend()
 plt.show()
 """
+# %%
+x = next(iter(train_data))[0:4]
+x = x.cuda()
+y, sp = model(x[:, :-1], get_gate=True)
 
+# %%
+with torch.no_grad():
+    for (w, m) in sp:
+        print(w)
+        print(m.max(), m.min())
