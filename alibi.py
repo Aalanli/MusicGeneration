@@ -2,6 +2,7 @@
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from base_layers import *
 
@@ -92,16 +93,18 @@ class DecoderBlock(nn.Module):
 
 
 class AlibiTransformer(nn.Module):
-    def __init__(self, n_vocab, d_model, n_layers, n_heads, max_sequence, proj_forward, dropout=0.1, activation=torch.nn.functional.relu) -> None:
+    def __init__(self, n_vocab, embed_dim, d_model, n_layers, n_heads, max_sequence, proj_forward, dropout=0.1, 
+                 activation=torch.nn.functional.gelu) -> None:
         super().__init__()
 
         self.n_vocab = n_vocab
+        self.embed_dim = embed_dim
         self.d_model = d_model
         self.n_layers = n_layers
         self.heads = n_heads
         self.max_sequence = max_sequence
         
-        self.embedding = nn.Parameter(torch.normal(size=(self.n_vocab, self.d_model), mean=0.0, std=0.02)) 
+        self.embedding = nn.Parameter(torch.normal(size=(self.n_vocab, self.embed_dim), mean=0.0, std=0.02)) 
         self.decoder_layers = nn.ModuleList([DecoderBlock(n_heads, d_model, proj_forward, activation, dropout) for _ in range(self.n_layers)])
         self.norm = Norm(self.d_model)
 
@@ -110,19 +113,21 @@ class AlibiTransformer(nn.Module):
     
     def forward(self, x: torch.Tensor):
         batch, seq_len = x.size()
+        h = self.embedding[x]
+
         if seq_len > self.max_sequence:
             mask = construct_alibi(seq_len, self.heads).to(x)
         else:
             mask = self.mask[:, :seq_len, :seq_len]
 
-        h = self.embedding[x]
-
         for layer in range(self.n_layers):
             h = self.decoder_layers[layer](h, mask)
 
         h = self.norm(h)
-        h_flat = h.reshape(batch * seq_len, self.d_model)
+        h_flat = h.reshape(batch * seq_len, self.embed_dim)
         logits = h_flat @ self.embedding.transpose(-1, -2)
         logits = logits.reshape([batch, seq_len, self.n_vocab])
-
         return logits
+
+def build(args):
+    return AlibiTransformer(**args)
