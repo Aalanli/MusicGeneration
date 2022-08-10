@@ -4,7 +4,7 @@ import numpy as np
 from tqdm import tqdm
 from data.datasetv2 import Reconstruct
 from train_utils import load_checkpoint
-from build_everything import model, dataset
+from model_baseline.build_everything import model, dataset
 
 
 def dummy_model(x: torch.Tensor):

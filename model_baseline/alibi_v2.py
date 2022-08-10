@@ -166,34 +166,25 @@ class AlibiTransformer(nn.Module):
         return seq
 
 
+
 class Criterion(nn.Module):
-    def __init__(self,
-        eos_coef=0.1,
-        vocab=[],
-        eos_tokens=[0, 1],
-        weights={},
-        **kwargs) -> None:
-
+    def __init__(self, 
+        loss_weights={'loss_notes': 1, 'loss_velocity': 1, 'loss_duration': 1}
+    ) -> None:
         super().__init__()
-        self.loss_weights = weights
+        self.loss_weights = loss_weights
         
-        cls_weights = [torch.ones(n) for n in vocab]
-        for i in range(len(vocab)):
-            for j in eos_tokens:
-                cls_weights[i][j] = eos_coef
-        self.register_buffer('weight_n', cls_weights[0])
-        self.register_buffer('weight_v', cls_weights[1])
-        self.register_buffer('weight_d', cls_weights[2])
-
     def forward(self, xs, y):
         n, v, d = xs
         losses = {}
-        losses['loss_notes']    = F.cross_entropy(n.transpose(-1, -2), y[:, 0], self.weight_n)
-        losses['loss_velocity'] = F.cross_entropy(v.transpose(-1, -2), y[:, 1], self.weight_v)
-        losses['loss_duration'] = F.cross_entropy(d.transpose(-1, -2), y[:, 2], self.weight_d)
+        # 1 is the padding index
+        losses['loss_notes']    = F.cross_entropy(n.transpose(-1, -2), y[:, 0], ignore_index=1)
+        losses['loss_velocity'] = F.cross_entropy(v.transpose(-1, -2), y[:, 1], ignore_index=1)
+        losses['loss_duration'] = F.cross_entropy(d.transpose(-1, -2), y[:, 2], ignore_index=1)
         loss = sum([self.loss_weights[k] * losses[k] for k in losses])
         losses['loss'] = loss
         return loss, losses
+    
 
 class Metrics(Metric):
     full_state_update = False
@@ -229,7 +220,7 @@ class Metrics(Metric):
         
 
 def build_model_and_criterion(args):
-    c = Criterion(vocab=[args.vocab_note, args.vocab_velocity, args.vocab_duration], **args)
+    c = Criterion(args.loss_weights)
     return AlibiTransformer(**args), c
 
 

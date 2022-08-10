@@ -13,8 +13,10 @@ def download_dataset():
         with zipfile.ZipFile("datasets/maestro/data.zip", 'r') as zip_f:
             zip_f.extractall("datasets/maestro")
 
+
 import sys
 import subprocess
+
 def install_dependencies():
     packages = [
         'wandb',
@@ -27,3 +29,10 @@ def install_dependencies():
     for p in packages:
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', p])
 
+
+def setup_env():
+    download_dataset()
+    # assuming that the installation of this dataset means that dependencies are installed
+    if not os.path.exists('datasets/maestro'):
+        install_dependencies()
+    

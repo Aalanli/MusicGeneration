@@ -112,6 +112,23 @@ def training_loop(
     run_dir = ".",
     mixed_precision=False
 ):
+    """
+    Expects:
+        train_set:
+            must have member get() -> Tuple[x: Any, y: Any]
+        model: 
+            inheriting torch.nn.Module
+            overloading __call__(x) -> pred: Any
+            where x is the same as returned by train_set.get()
+        criterion:
+            inheriting torch.nn.Module
+            overloading __call__(pred, y) -> Tuple[total_loss: torch.Tensor, loss_dict: Dict[str, float]]
+        optimizer:
+            standard torch.optim optimizer
+        logger:
+            must have member step.remote(pred, y, loss_dict) -> None
+            and member log.remote() -> None
+    """
     if not os.path.exists(run_dir):
         os.makedirs(run_dir)
     
@@ -129,8 +146,8 @@ def training_loop(
             criterion.load_state_dict(state_dict['criterion'])
             lr_scheduler.load_state_dict(state_dict['lr_scheduler'])
             steps = state_dict['steps']
-        except:
-            print("unable to load")
+        except Exception as e:
+            print("unable to load due to:", e)
 
     steps = 0
     steps_since_log = 0
@@ -144,7 +161,7 @@ def training_loop(
             x, y = gpu_data
             with torch.cuda.amp.autocast(mixed_precision):
                 model.train()
-                pred = model(*x)
+                pred = model(x)
                 total_loss, loss_dict = criterion(pred, y)
                 assert not torch.isnan(total_loss).any()
             

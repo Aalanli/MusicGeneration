@@ -2,11 +2,11 @@
 import torch
 
 from torch.utils.data import DataLoader
-from data.dataset import Data
+from data.old.dataset import Data
 
 from alibi import AlibiTransformer
-from fixed_pos import RotaryTransformer
-from relative_pos import RelativeTransformer
+from .rotary_transformer import RotaryTransformer
+from .relative_transformer import RelativeTransformer
 from sparse_alibi import AlibiTransformer as SparseTransformer
 from model_utils import TrainerWandb, calculate_perplexities_pure, calculate_perplexities_teacher
 from misc import EasyDict, CustomScheduler
