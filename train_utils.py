@@ -146,6 +146,7 @@ def training_loop(
                 model.train()
                 pred = model(*x)
                 total_loss, loss_dict = criterion(pred, y)
+                assert not torch.isnan(total_loss).any()
             
             optimizer.zero_grad()
             scaler.scale(total_loss).backward()
