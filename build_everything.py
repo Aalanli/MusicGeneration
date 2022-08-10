@@ -83,11 +83,14 @@ if __name__ == '__main__':
     configs.description                   = 'naive baseline model with no adjustments'
 
     run_fn = lambda: wandb.init(project='MusicGeneration', entity='allanl', dir=train_args.run_dir, 
-        id=run_name, config=configs, resume='allow')
+        group=run_name, id=run_name, config=configs, resume='allow')
     logger = Logger.remote(run_fn, metrics)
 
     model = model.cuda()
     criterion = criterion.cuda()
 
-    train_args.epochs = 120
-    training_loop(model, dataset, criterion, optimizer, lr_scheduler, logger, **train_args)
+    run = run_fn()
+    with run:
+        wandb.watch(model)
+        train_args.epochs = 120
+        training_loop(model, dataset, criterion, optimizer, lr_scheduler, logger, **train_args)
