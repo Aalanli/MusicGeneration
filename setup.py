@@ -20,7 +20,9 @@ def install_dependencies():
         'wandb',
         'ray',
         'tqdm',
-        'py_midicsv'
+        'py_midicsv',
+        'torchmetrics',
+        'numba'
     ]
     for p in packages:
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', p])
