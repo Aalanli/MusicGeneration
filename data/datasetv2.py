@@ -160,7 +160,7 @@ class Dataset:
         return len(self.files)
     
     def get(self):
-        if len(self.obj_refs) > 0:
+        if len(self.obj_refs) > self.batch_size:
             data, self.obj_refs = ray.wait(self.obj_refs, num_returns=self.batch_size)
             data = ray.get(data)
             self.data.extend(data)
@@ -168,6 +168,11 @@ class Dataset:
             arr = np.stack(arr, axis=0)
             return [arr[:, :, :-1]], arr[:, :, 1:]
         elif isinstance(self.data, list):
+            # fixes bug if number of files is not a multiple of batch_size
+            if 0 < len(self.obj_refs) and len(self.obj_refs) < self.batch_size:
+                data = ray.get(self.obj_refs)
+                self.obj_refs = []
+                self.obj_store.extend(data)
             self.data = cycle(self.data)
             self.obj_store = [self.actors[i % self.workers].transform.remote(*next(self.data)) for i in range(self.batch_size * 3)]
         

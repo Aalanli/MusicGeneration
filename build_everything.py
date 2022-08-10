@@ -50,7 +50,7 @@ from data.datasetv2 import Dataset
 d_args = EasyDict()
 
 
-data_dir = r'/datasets/maestro/maestro-v3.0.0'
+data_dir = r'datasets/maestro/maestro-v3.0.0'
 d_args.batch_size            = 4
 d_args.workers               = 2
 d_args.seq_len               = 1024
