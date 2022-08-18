@@ -168,18 +168,30 @@ class AlibiTransformer(nn.Module):
 
 
 class Criterion(nn.Module):
-    def __init__(self, 
+    def __init__(self,
+        vocab_n=92,
+        vocab_v=130,
+        vocab_d=203,
         loss_weights={'loss_notes': 1, 'loss_velocity': 1, 'loss_duration': 1}
     ) -> None:
         super().__init__()
         self.loss_weights = loss_weights
-        
+        w_n = torch.ones(vocab_n)
+        w_n[1] = 0
+        w_n[2] = 0.05
+        self.register_buffer('weight_n', w_n)
+
+        w_v = torch.ones(vocab_v)
+        w_v[1] = 0
+        w_v[2] = 0.05
+        self.register_buffer('weight_v', w_v)
+
     def forward(self, xs, y):
         n, v, d = xs
         losses = {}
         # 1 is the padding index
-        losses['loss_notes']    = F.cross_entropy(n.transpose(-1, -2), y[:, 0], ignore_index=1)
-        losses['loss_velocity'] = F.cross_entropy(v.transpose(-1, -2), y[:, 1], ignore_index=1)
+        losses['loss_notes']    = F.cross_entropy(n.transpose(-1, -2), y[:, 0], self.weight_n)
+        losses['loss_velocity'] = F.cross_entropy(v.transpose(-1, -2), y[:, 1], self.weight_v)
         losses['loss_duration'] = F.cross_entropy(d.transpose(-1, -2), y[:, 2], ignore_index=1)
         loss = sum([self.loss_weights[k] * losses[k] for k in losses])
         losses['loss'] = loss
@@ -220,7 +232,7 @@ class Metrics(Metric):
         
 
 def build_model_and_criterion(args):
-    c = Criterion(args.loss_weights)
+    c = Criterion(args.vocab_note, args.vocab_velocity, args.vocab_duration, args.loss_weights)
     return AlibiTransformer(**args), c
 
 
