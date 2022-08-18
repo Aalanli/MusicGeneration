@@ -7,6 +7,7 @@ import ray
 import numpy as np
 import data.parse_midi_numba as pm
 
+
 @dataclass
 class UnifiedEncoding:
     seq_len: int
