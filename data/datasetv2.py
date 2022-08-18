@@ -1,5 +1,6 @@
 # %%
 import random
+from typing import Iterator
 import ray
 import numpy as np
 from pathlib import Path
@@ -13,9 +14,7 @@ import data.parse_midi_numba as pm
 def file_to_midi_norm_stream(file: str):
     raw_stream = pm.parse_raw_midi_stream(file)
     stream = pm.raw_stream_to_stream(raw_stream)
-    durations = stream.events[:, 2] / stream.ticks
-    notes = stream.events[:, 0] + 1
-    return notes, stream.events[:, 1], durations
+    return stream
 
 
 def get_midi_files(data_dir):
@@ -36,7 +35,6 @@ class Dataset:
         
         self.batch_size = batch_size
         self.actors = transform_actors
-        self.workers = len(self.actors)
 
         self.files = get_midi_files(data_dir)
         random.shuffle(self.files)
@@ -47,6 +45,13 @@ class Dataset:
     
     def __len__(self):
         return len(self.files)
+    
+    def flush_cache(self):
+        if isinstance(self.data, Iterator):
+            self.obj_queue.clear()
+            for i in range(len(self.actors)):
+                # save the worker id for each computation
+                self.obj_queue.append((self.actors[i].call.remote([next(self.data) for _ in range(self.batch_size)]), i))
     
     def get(self):
         if len(self.obj_refs) > self.batch_size:
@@ -63,9 +68,7 @@ class Dataset:
                 self.data.extend(data)
             self.data = cycle(self.data)
             # prepare a queue of waiting computation, such that len(queue) = self.workers
-            for i in range(self.workers):
-                # save the worker id for each computation
-                self.obj_queue.append((self.actors[i].call.remote([next(self.data) for _ in range(self.batch_size)]), i))
+            self.flush_cache()
         
         w_ref, w_id = self.obj_queue.popleft()
         x, y = ray.get(w_ref)
