@@ -173,30 +173,30 @@ def training_loop(
             # commence logging and checkpointing operations
             remove_extra_checkpoints(run_dir, keep=3)
             
-            with torch.no_grad():
-                steps += batch_size
-                steps_since_log += batch_size
-                steps_since_checkpoint += batch_size
-                to_cpu = lambda x: recursive_cast(x, lambda x: x.argmax(-1).cpu())
-                logger.step.remote(to_cpu(pred), torch.from_numpy(data[1]), recursive_cast(loss_dict, lambda x: x.cpu()))
+            steps += batch_size
+            steps_since_log += batch_size
+            steps_since_checkpoint += batch_size
+            to_cpu = lambda x: recursive_cast(x, lambda x: x.argmax(-1).cpu())
+            logger.step.remote(to_cpu(pred), torch.from_numpy(data[1]), recursive_cast(loss_dict, lambda x: x.cpu()))
 
-                
-                rem = steps_since_log // log_scalar_metric_step
-                if rem > 0: # accumulated greater than the log_metric_step threshold
-                    logger.log.remote(steps, steps_since_log)
-                    steps_since_log = 0
-                
-                rem = steps_since_checkpoint // checkpoint_step
-                if rem > 0:
-                    state_dict = {}
-                    state_dict['model'] = model.state_dict()
-                    state_dict['optmizer'] = optimizer.state_dict()
-                    state_dict['grad_scaler'] = scaler.state_dict()
-                    state_dict['criterion'] = criterion.state_dict()
-                    state_dict['lr_scheduler'] = lr_scheduler.state_dict()
-                    state_dict['steps'] = steps
-                    save_checkpoint(state_dict, steps, run_dir)
-                    steps_since_checkpoint = 0
+            
+            rem = steps_since_log // log_scalar_metric_step
+            if rem > 0: # accumulated greater than the log_metric_step threshold
+                wandb.log({}) # dummy log for wandb to log gradients
+                logger.log.remote(steps, steps_since_log)
+                steps_since_log = 0
+            
+            rem = steps_since_checkpoint // checkpoint_step
+            if rem > 0:
+                state_dict = {}
+                state_dict['model'] = model.state_dict()
+                state_dict['optmizer'] = optimizer.state_dict()
+                state_dict['grad_scaler'] = scaler.state_dict()
+                state_dict['criterion'] = criterion.state_dict()
+                state_dict['lr_scheduler'] = lr_scheduler.state_dict()
+                state_dict['steps'] = steps
+                save_checkpoint(state_dict, steps, run_dir)
+                steps_since_checkpoint = 0
 
         lr_scheduler.step()
         state_dict = {}
