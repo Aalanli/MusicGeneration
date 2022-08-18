@@ -7,6 +7,32 @@ import ray
 import numpy as np
 import data.parse_midi_numba as pm
 
+@dataclass
+class UnifiedEncoding:
+    seq_len: int
+    notes: Tuple[int, int]
+    velocities: Tuple[int, int]
+    durations: Tuple[float, float]
+    duration_lin_bins: int = 100
+    note_bins: int = 89
+    velocity_bins: int = 127
+    clip_time_skip: int = 0
+
+    def __post_init__(self):
+        self.bin_arr = np.cumsum(pm.compute_lin_bin(0, 5, self.duration_lin_bins))
+
+        self.duration_bins = self.duration_lin_bins
+        # reserve 2 extra bins for beginning of sequence and end of sequence
+        self.final_bins =  self.note_bins + 2
+        self.final_bins += self.velocity_bins + 2
+        self.final_bins += self.duration_bins + 2
+    
+    def pad(self, arr: np.ndarray):
+        arr += 2
+        pad = self.seq_len - arr.shape[0] - 2
+        return np.concatenate([[0], arr, np.ones(1 + pad, dtype=arr.dtype)])
+
+    
 
 @ray.remote
 @dataclass
@@ -25,6 +51,7 @@ class SeparatedEncoding:
     duration_lin_bins: int = 100
     note_bins: int = 89
     velocity_bins: int = 127
+    clip_time_skip: int = 0
 
     def __post_init__(self):
         self.bin_arr = np.cumsum(pm.compute_lin_bin(0, 5, self.duration_lin_bins))
@@ -48,17 +75,17 @@ class SeparatedEncoding:
 
         # truncate to required size
         if notes.shape[0] > self.seq_len - 2:
-            idx = np.random.randint(0, notes.shape[0] - self.seq_len - 2)
+            idx = np.random.randint(0, notes.shape[0] - self.seq_len + 2)
             end = idx + self.seq_len - 2
             notes = notes[idx:end]
             velocities = velocities[idx:end]
             durations = durations[idx:end]
         
-        notes[np.where(notes != 0)] += np.random.randint(self.notes[0], self.notes[1])
+        notes[notes != 0] += np.random.randint(self.notes[0], self.notes[1])
         notes = np.clip(notes, 0, self.note_bins)
         notes = self.pad(notes)
 
-        velocities = np.random.randint(self.velocities[0], self.velocities[1]) + velocities
+        velocities[velocities != 0] += np.random.randint(self.velocities[0], self.velocities[1])
         velocities = np.clip(velocities, 0, self.velocity_bins)
         velocities = self.pad(velocities)
 
@@ -69,7 +96,19 @@ class SeparatedEncoding:
 
         return np.stack([notes, velocities, durations], axis=0)
     
-    def call(self, data: List[Tuple[np.ndarray, np.ndarray, np.ndarray]]):
+    def filter_durations(self, stream: pm.MidiStream):
+        data = np.transpose(stream.events, (1, 0))
+        is_time_skip = data[0] == -1
+        is_small = data[2] < self.clip_time_skip
+        predicate = np.invert(is_time_skip & is_small)
+        data = data[:, predicate]
+        notes = data[0] + 1
+        durations = data[2] / stream.ticks
+
+        return notes, data[1], durations
+    
+    def call(self, data: List[pm.MidiStream]):
+        data = map(self.filter_durations, data)
         data = np.stack([self.transform_single_batch(*d) for d in data], axis=0)
         return data[:, :, :-1], data[:, :, 1:]
 
@@ -100,11 +139,11 @@ class SeparatedReconstruct:
             ind = np.argmax(arr[0] == 1)
             arr = arr[:, :ind]
 
+        arr -= 2 # unshift padding from transfroms 
         arr[0] = np.clip(arr[0], 0, self.note_bins)
         arr[1] = np.clip(arr[1], 0, self.velocity_bins)
-        arr[2] = np.clip(arr[2], 0, self.duration_lin_bins)
+        arr[2] = np.clip(arr[2], 0, self.duration_lin_bins - 1)
 
-        arr -= 2 # unshift padding from transfroms 
         arr[0] -= 1 # unshift note from file_to_midi_norm_stream
 
         # remove notes that have a velocity of 0

@@ -41,31 +41,26 @@ print(time.time() - cur_time)
 durations = map(lambda x: x.events[:, 2] / x.ticks, streams)
 durations = np.concatenate(list(durations))
 
-# %%
 velocities = map(lambda x: x.events[:, 1], streams)
 velocities = np.concatenate(list(velocities))
 
-# %%
 notes = map(lambda x: x.events[:, 0], streams)
 notes = np.concatenate(list(notes))
 
-# %%
+print("duration stats")
 print(durations.max(), durations.min())
 print(durations.dtype)
 plt.hist(durations, bins=100)
 
-# %%
+print("velocity stats")
 print(velocities.max(), velocities.min())
 print(velocities.dtype)
 print(velocities.shape)
 plt.hist(velocities)
 
 # %%
-print((durations < 7).mean())
-
-# %%
-print(notes.shape, notes.dtype)
-print(notes.max(), notes.min())
+time_shifts = (notes == -1) & (durations < 20)
+print(time_shifts.mean())
 
 # %%
 def compute_percentile_cutoff(durations, percent=0.99, bins=1000):
@@ -187,6 +182,11 @@ def reconstruction_error(arr1, arr2, lo, hi):
 def test_reconstruction(file, bin_arr):
     raw_stream = pm.parse_raw_midi_stream(file)
     stream = pm.raw_stream_to_stream(raw_stream)
+
+    time_shifts = (stream.events[:, 0] == -1) & (stream.events[:, 2] < 20)
+    print(time_shifts.mean())
+    keep_shifts = np.invert(time_shifts)
+    stream.events = stream.events[keep_shifts, :]
     
     original_durations = copy.deepcopy(stream.events[:, 2])
     durations = stream.events[:, 2] / stream.ticks
@@ -209,3 +209,47 @@ def test_reconstruction(file, bin_arr):
 test_reconstruction(files[1], bin_arr)
 
 # TODO: Make data-dependent arr-bin function
+# %%
+import numpy as np
+from matplotlib import pyplot as plt
+from misc import EasyDict
+import ray
+
+ray.init()
+
+from data.datasetv2 import Dataset
+from data.transforms import SeparatedEncoding, SeparatedReconstruct
+
+d_args = EasyDict()
+
+data_dir = r'datasets/maestro/maestro-v3.0.0'
+d_args.batch_size            = 4
+d_args.workers               = 2
+d_args.seq_len               = 1025               # one extra token since loss is auto-regressive
+d_args.duration_lin_bins     = 200                # number of linear (same width) bins/embeddings for duration
+d_args.note_shifts           = (-5, 5)            # random integer shifts in note for augmentation
+d_args.velocity_shifts       = (-7, 7)            # augment velocities as well
+d_args.duration_muls         = (0.8, 1.2)         # random multiplication to duration from uniform distribution
+
+
+# %%
+actors = [SeparatedEncoding.remote(
+    d_args.seq_len,
+    d_args.note_shifts,
+    d_args.velocity_shifts,
+    d_args.duration_muls,
+    d_args.duration_lin_bins,
+    clip_time_skip=15
+) for _ in range(d_args.workers)]
+dataset = Dataset(data_dir, d_args.batch_size, actors)
+
+# %%
+x, y = dataset.get()
+plt.hist(x[0, 0], bins=92)
+
+# %%
+print((x[:, 0] == 2).sum() / np.prod(x[:, 0].shape))
+
+# %%
+rc = SeparatedReconstruct(duration_lin_bins=200)
+rc.binned_encoding_to_file("reconstructed.midi", dataset.get()[0][0])
