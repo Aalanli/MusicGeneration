@@ -2,6 +2,8 @@
 import random
 from typing import Iterator
 import ray
+import os
+import pickle
 import numpy as np
 from pathlib import Path
 from itertools import cycle
@@ -31,15 +33,22 @@ class Dataset:
     def __init__(self,
         data_dir,
         batch_size,
-        transform_actors) -> None:
+        transform_actors,
+        cache_file=None) -> None:
         
         self.batch_size = batch_size
         self.actors = transform_actors
+        self.cache_file = cache_file
 
-        self.files = get_midi_files(data_dir)
-        random.shuffle(self.files)
-        self.obj_refs = [file_to_midi_norm_stream.remote(f) for f in self.files]
-        self.data = []
+        if self.cache_file is not None and os.path.exists(cache_file):
+            with open(self.cache_file, 'rb') as f:
+                self.data = pickle.load(f)
+                self.obj_refs = []
+        else:
+            self.files = get_midi_files(data_dir)
+            random.shuffle(self.files)
+            self.obj_refs = [file_to_midi_norm_stream.remote(f) for f in self.files]
+            self.data = []
 
         self.obj_queue = deque()
     
@@ -66,6 +75,13 @@ class Dataset:
                 data = ray.get(self.obj_refs)
                 self.obj_refs = []
                 self.data.extend(data)
+            # now that everything is computed, cache data if option is set
+            if self.cache_file is not None and not os.path.exists(self.cache_file):
+                if not os.path.exists(os.path.dirname(self.cache_file)):
+                    os.makedirs(os.path.dirname(self.cache_file))
+                with open(self.cache_file, 'wb') as f:
+                    pickle.dump(self.data, f)
+            
             self.data = cycle(self.data)
             # prepare a queue of waiting computation, such that len(queue) = self.workers
             self.flush_cache()
@@ -107,8 +123,6 @@ if __name__ == '__main__':
     dataset = Dataset(data_dir, d_args.batch_size, actors)
     # %%
     x, y = dataset.get()
-    print(x.shape)
-
     rc = UnifiedReconstruct()
     rc.binned_encoding_to_file('reconstructed.midi', x[0])
 
