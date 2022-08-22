@@ -171,7 +171,7 @@ class UnifiedEncoding:
 
         # truncate to required size
         if data.shape[0] > self.seq_len - 2:
-            idx = np.random.randint(0, notes.shape[0] - self.seq_len + 2)
+            idx = np.random.randint(0, data.shape[0] - self.seq_len + 2)
             end = idx + self.seq_len - 2
             data = data[idx:end]
         
