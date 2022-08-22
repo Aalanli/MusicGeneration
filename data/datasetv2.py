@@ -82,10 +82,9 @@ def build(args):
 
 
 if __name__ == '__main__':
-    ray.init()
     from misc import EasyDict
     from data.datasetv2 import Dataset
-    from data.transforms import SeparatedEncoding
+    from data.transforms import SeparatedEncoding, UnifiedEncoding, UnifiedReconstruct
 
     d_args = EasyDict()
 
@@ -98,7 +97,7 @@ if __name__ == '__main__':
     d_args.velocity_shifts       = (-7, 7)
     d_args.duration_muls         = (0.8, 1.2)
 
-    actors = [SeparatedEncoding.remote(
+    actors = [UnifiedEncoding.remote(
         d_args.seq_len,
         d_args.note_shifts,
         d_args.velocity_shifts,
@@ -106,6 +105,10 @@ if __name__ == '__main__':
         d_args.duration_lin_bins
     ) for _ in range(d_args.workers)]
     dataset = Dataset(data_dir, d_args.batch_size, actors)
-    
+    # %%
     x, y = dataset.get()
     print(x.shape)
+
+    rc = UnifiedReconstruct()
+    rc.binned_encoding_to_file('reconstructed.midi', x[0])
+

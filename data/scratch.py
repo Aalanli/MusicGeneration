@@ -218,7 +218,7 @@ import ray
 ray.init()
 
 from data.datasetv2 import Dataset
-from data.transforms import SeparatedEncoding, SeparatedReconstruct
+from data.transforms import UnifiedEncoding, SeparatedEncoding, SeparatedReconstruct
 
 d_args = EasyDict()
 
@@ -233,7 +233,7 @@ d_args.duration_muls         = (0.8, 1.2)         # random multiplication to dur
 
 
 # %%
-actors = [SeparatedEncoding.remote(
+actors = [UnifiedEncoding.remote(
     d_args.seq_len,
     d_args.note_shifts,
     d_args.velocity_shifts,
