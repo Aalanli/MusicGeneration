@@ -6,7 +6,7 @@ from matplotlib import pyplot as plt
 
 from data.transforms import SeparatedReconstruct
 from train_utils import load_checkpoint
-from model_baseline.build_everything import model, dataset
+from model_baseline.build_everything_separated import model, dataset
 
 
 def dummy_model(x: torch.Tensor):
