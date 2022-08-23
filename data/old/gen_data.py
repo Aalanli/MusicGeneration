@@ -4,7 +4,7 @@ import tqdm
 
 import ray
 
-from data.parse_midi import *
+from data.old.parse_midi import *
 
 
 def give_file_paths(data_dir):
