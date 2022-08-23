@@ -346,9 +346,9 @@ class UnifiedReconstruct:
         if (arr == 0).any():
             arr = arr[1:]
         if (arr == 1).any():
-            ind = np.argmax(arr[0] == 1)
+            ind = np.argmax(arr == 1)
             arr = arr[:ind]
-
+        print(arr.shape)
         arr -= 2 # unshift padding from transfroms
         arr = unflatten_notes_(arr)
 
