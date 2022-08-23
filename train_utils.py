@@ -66,14 +66,14 @@ class Logger:
             else:
                 self.log_loss[k] = float(loss_dict[k])
 
-    def log(self, steps, steps_since_log):
+    def log(self, steps, steps_since_log, prefix='train'):
         # accumulated greater than the log_metric_step threshold
         # this step is very slow, move to another thread
         log_dict = {}
         log_dict.update({k: v / steps_since_log for k, v in self.log_loss.items()})
         log_dict.update(self.metrics.compute())
 
-        log_scalars(log_dict, steps, 'train')
+        log_scalars(log_dict, steps, prefix)
         self.metrics.reset()
         for k in self.log_loss:
             self.log_loss[k] = 0.0
@@ -109,6 +109,8 @@ def training_loop(
     checkpoint_step,
     epochs,
     batch_size,
+    eval_set=None,
+    eval_logger=None,
     run_dir = ".",
     mixed_precision=False
 ):
@@ -179,11 +181,23 @@ def training_loop(
             to_cpu = lambda x: recursive_cast(x, lambda x: x.argmax(-1).cpu())
             logger.step.remote(to_cpu(pred), torch.from_numpy(data[1]), recursive_cast(loss_dict, lambda x: x.cpu()))
 
+            if eval_set is not None and eval_logger is not None:
+                with torch.no_grad():
+                    model.eval()
+                    with torch.cuda.amp.autocast(mixed_precision):
+                        eval_data = eval_set.get()
+                        gpu_data = recursive_cast(eval_data, lambda x: torch.from_numpy(x).cuda())
+                        x, y = gpu_data
+                        pred = model(x)
+                        # don't compute eval loss for now
+                        eval_logger.step.remote(to_cpu(pred), torch.from_numpy(eval_data[1]), {})
+            
             
             rem = steps_since_log // log_scalar_metric_step
             if rem > 0: # accumulated greater than the log_metric_step threshold
                 wandb.log({}) # dummy log for wandb to log gradients
                 logger.log.remote(steps, steps_since_log)
+                logger.log.remote(steps, steps_since_log, prefix='eval')
                 steps_since_log = 0
             
             rem = steps_since_checkpoint // checkpoint_step
