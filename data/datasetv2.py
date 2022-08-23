@@ -34,6 +34,7 @@ class Dataset:
         data_dir,
         batch_size,
         transform_actors,
+        files=None,
         cache_file=None) -> None:
         
         self.batch_size = batch_size
@@ -45,7 +46,10 @@ class Dataset:
                 self.data = pickle.load(f)
                 self.obj_refs = []
         else:
-            self.files = get_midi_files(data_dir)
+            if files is not None:
+                self.files = files
+            else:
+                self.files = get_midi_files(data_dir)
             random.shuffle(self.files)
             self.obj_refs = [file_to_midi_norm_stream.remote(f) for f in self.files]
             self.data = []
