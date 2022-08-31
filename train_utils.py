@@ -197,7 +197,8 @@ def training_loop(
             if rem > 0: # accumulated greater than the log_metric_step threshold
                 wandb.log({}) # dummy log for wandb to log gradients
                 logger.log.remote(steps, steps_since_log)
-                logger.log.remote(steps, steps_since_log, prefix='eval')
+                if eval_logger is not None:
+                    eval_logger.log.remote(steps, steps_since_log, prefix='eval')
                 steps_since_log = 0
             
             rem = steps_since_checkpoint // checkpoint_step
